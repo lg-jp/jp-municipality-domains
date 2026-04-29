@@ -1,0 +1,59 @@
+name: URL monitor (SearXNG)
+
+on:
+  schedule:
+    - cron: '0 15 * * 0'
+  workflow_dispatch:
+
+concurrency:
+  group: url-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    services:
+      searxng:
+        image: docker.io/searxng/searxng:latest
+        ports:
+          - 8080:8080
+        env:
+          SEARXNG_BIND_ADDRESS: '0.0.0.0'
+          SEARXNG_PORT: '8080'
+
+    env:
+      SEARXNG_BASE_URL: http://127.0.0.1:8080
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Wait for SearXNG
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 90); do
+            curl -fsS -m 8 "${SEARXNG_BASE_URL}/" >/dev/null 2>&1 && exit 0
+            sleep 2
+          done
+          echo "::error::SearXNG did not become ready in time."
+          exit 1
+
+      - name: Run URL monitor
+        shell: bash
+        run: |
+          set -o pipefail
+          go run ./cmd/url-monitor | tee url-monitor-report.txt
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: url-monitor-report
+          path: url-monitor-report.txt
+          if-no-files-found: warn
