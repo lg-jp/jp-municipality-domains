@@ -14,15 +14,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
-    services:
-      searxng:
-        image: docker.io/searxng/searxng:latest
-        ports:
-          - 8080:8080
-        env:
-          SEARXNG_BIND_ADDRESS: '0.0.0.0'
-          SEARXNG_PORT: '8080'
-
     env:
       SEARXNG_BASE_URL: http://127.0.0.1:8080
 
@@ -34,6 +25,18 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Start SearXNG with repo settings.yml
+        run: |
+          set -euo pipefail
+          test -f settings.yml
+          docker run -d --name searxng \
+            --publish 8080:8080 \
+            --volume "${GITHUB_WORKSPACE}/settings.yml:/etc/searxng/settings.yml:ro" \
+            --env SEARXNG_BIND_ADDRESS=0.0.0.0 \
+            --env SEARXNG_PORT=8080 \
+            --env SEARXNG_LIMITER=false \
+            docker.io/searxng/searxng:latest
+
       - name: Wait for SearXNG
         run: |
           set -euo pipefail
@@ -42,6 +45,7 @@ jobs:
             sleep 2
           done
           echo "::error::SearXNG did not become ready in time."
+          docker logs searxng 2>&1 | tail -100 || true
           exit 1
 
       - name: Run URL monitor
@@ -49,6 +53,10 @@ jobs:
         run: |
           set -o pipefail
           go run . | tee url-monitor-report.txt
+
+      - name: Stop SearXNG
+        if: always()
+        run: docker rm -f searxng 2>/dev/null || true
 
       - name: Upload report
         if: always()
