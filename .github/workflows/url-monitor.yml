@@ -48,7 +48,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          go run ./cmd/url-monitor | tee url-monitor-report.txt
+          go run . | tee url-monitor-report.txt
 
       - name: Upload report
         if: always()
