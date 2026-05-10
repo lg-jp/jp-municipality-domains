@@ -17,7 +17,7 @@ import (
 const (
 	searxngBaseURL = "http://127.0.0.1:8080"
 	resultLimit    = 3
-	requestDelay   = time.Second
+	requestDelay   = 3 * time.Second
 )
 
 //go:embed data.json

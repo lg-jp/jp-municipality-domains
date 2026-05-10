@@ -6,22 +6,14 @@ import (
 )
 
 var ExcludedDomains = []string{
-	"facebook.com",
-	"instagram.com",
 	"x.com",
-	"twitter.com",
-	"threads.net",
-	"linkedin.com",
-	"wikipedia.org",
-	"wikimedia.org",
-	"youtube.com",
-	"youtu.be",
-	"tiktok.com",
-	"note.com",
-	"ameblo.jp",
-	"line.me",
+	"instagram.com",
+	"facebook.com",
 	"yahoo.co.jp",
-	"yahoo.com",
+	"youtube.com",
+	"wikipedia.org",
+	"homemate-research-public.com",
+	"mykoho.jp",
 }
 
 func NormalizeHost(raw string) string {
