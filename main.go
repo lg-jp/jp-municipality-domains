@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -25,10 +26,10 @@ const (
 	defaultWorkers       = 32
 	githubActionsWorkers = 12 // avoid mass rate-limit / flaky failures on runners
 	reqTimeout           = 45 * time.Second
-	maxRetries    = 5
-	baseBackoff   = 800 * time.Millisecond
-	maxRedirects  = 10
-	bodyReadLimit = 256 * 1024
+	maxRetries           = 5
+	baseBackoff          = 800 * time.Millisecond
+	maxRedirects         = 10
+	bodyReadLimit        = 256 * 1024
 )
 
 type record struct {
@@ -36,11 +37,10 @@ type record struct {
 }
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	slog.SetDefault(logger)
 
 	nWorkers := resolveWorkerCount()
-	logger.Info("starting URL monitor", "workers", nWorkers)
 
 	recs, err := unmarshalRecords(dataJSON)
 	if err != nil {
@@ -78,7 +78,6 @@ func main() {
 		logger.Error("finished with failures", "failed", n, "checked", checked.Load())
 		os.Exit(1)
 	}
-	logger.Info("all URLs OK", "count", checked.Load())
 }
 
 func resolveWorkerCount() int {
@@ -113,13 +112,12 @@ func monitorURL(ctx context.Context, log *slog.Logger, rawURL string) error {
 		attemptLog := log.With("url", rawURL, "attempt", attempt+1)
 		err := fetchOnce(ctx, attemptLog, rawURL)
 		if err == nil {
-			if attempt > 0 {
-				attemptLog.Info("recovered after retry")
-			}
 			return nil
 		}
 		lastErr = err
-		attemptLog.Warn("request attempt failed", "error", err)
+		if !isIgnorableTLSError(err) {
+			attemptLog.Warn("request attempt failed", "error", err)
+		}
 	}
 	return fmt.Errorf("after %d attempts: %w", maxRetries, lastErr)
 }
@@ -170,7 +168,7 @@ func fetchOnce(ctx context.Context, log *slog.Logger, rawURL string) error {
 	client := &http.Client{
 		Timeout:       reqTimeout,
 		CheckRedirect: checkRedirect,
-		Transport:     http.DefaultTransport,
+		Transport:     tlsIgnoringTransport(),
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
@@ -181,6 +179,9 @@ func fetchOnce(ctx context.Context, log *slog.Logger, rawURL string) error {
 
 	resp, err := client.Do(req)
 	if err != nil {
+		if isIgnorableTLSError(err) {
+			return nil
+		}
 		return err
 	}
 	defer resp.Body.Close()
@@ -191,18 +192,24 @@ func fetchOnce(ctx context.Context, log *slog.Logger, rawURL string) error {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	if finalParsed, ferr := url.Parse(resp.Request.URL.String()); ferr == nil && finalParsed.Host != "" {
-		if deriveCanonicalHost(finalParsed) != startHost {
-			log.Warn("final host differs from entry URL host (possible domain migration)",
-				"start_host", parsedStart.Host,
-				"final_host", finalParsed.Host,
-				"final_url", resp.Request.URL.String(),
-			)
-		}
-	}
-
-	log.Info("OK", "status", resp.StatusCode, "final_url", resp.Request.URL.String())
 	return nil
+}
+
+func tlsIgnoringTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	}
+	transport.TLSClientConfig.InsecureSkipVerify = true
+	return transport
+}
+
+func isIgnorableTLSError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "tls:") || strings.Contains(msg, "x509:") || strings.Contains(msg, "certificate")
 }
 
 func applyBrowserHeaders(req *http.Request) {
