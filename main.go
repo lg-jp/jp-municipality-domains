@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -32,12 +33,17 @@ const (
 	bodyReadLimit        = 256 * 1024
 )
 
+// errEdgeBlocked marks a response a CDN produced itself to reject us, rather
+// than one it proxied from the origin. The domain is alive; our source IP is
+// simply not welcome, so this is reported but never counted as a failure.
+var errEdgeBlocked = errors.New("blocked at CDN edge")
+
 type record struct {
 	URL string `json:"url"`
 }
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	slog.SetDefault(logger)
 
 	nWorkers := resolveWorkerCount()
@@ -49,6 +55,7 @@ func main() {
 	}
 
 	var failCount atomic.Int64
+	var blockedCount atomic.Int64
 	var checked atomic.Int64
 	sem := make(chan struct{}, nWorkers)
 	var wg sync.WaitGroup
@@ -66,7 +73,12 @@ func main() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			if err := monitorURL(ctx, logger, raw); err != nil {
+			switch err := monitorURL(ctx, logger, raw); {
+			case err == nil:
+			case errors.Is(err, errEdgeBlocked):
+				blockedCount.Add(1)
+				logger.Warn("URL blocked at CDN edge; host is reachable, not counted as a failure", "url", raw, "error", err)
+			default:
 				failCount.Add(1)
 				logger.Error("URL check failed", "url", raw, "error", err)
 			}
@@ -74,6 +86,9 @@ func main() {
 	}
 	wg.Wait()
 
+	if n := blockedCount.Load(); n > 0 {
+		logger.Warn("some URLs were blocked at a CDN edge", "blocked", n, "checked", checked.Load())
+	}
 	if n := failCount.Load(); n > 0 {
 		logger.Error("finished with failures", "failed", n, "checked", checked.Load())
 		os.Exit(1)
@@ -113,6 +128,10 @@ func monitorURL(ctx context.Context, log *slog.Logger, rawURL string) error {
 		err := fetchOnce(ctx, attemptLog, rawURL)
 		if err == nil {
 			return nil
+		}
+		// The edge decides on our source IP, so every retry repeats the block.
+		if errors.Is(err, errEdgeBlocked) {
+			return err
 		}
 		lastErr = err
 		if !isIgnorableTLSError(err) {
@@ -188,11 +207,31 @@ func fetchOnce(ctx context.Context, log *slog.Logger, rawURL string) error {
 	if _, err := io.Copy(io.Discard, io.LimitReader(resp.Body, bodyReadLimit)); err != nil {
 		return err
 	}
+	if edge := edgeBlockSource(resp); edge != "" {
+		return fmt.Errorf("HTTP %d from %s: %w", resp.StatusCode, edge, errEdgeBlocked)
+	}
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
 	return nil
+}
+
+// edgeBlockSource names the CDN that rejected the request, or "" if the
+// response came from the origin. A CDN passes the origin's Server header
+// through on a proxied response, so a CDN naming itself there alongside a 403
+// means the request never reached the site. Add other CDNs here once a real
+// response from one has been observed.
+func edgeBlockSource(resp *http.Response) string {
+	if resp.StatusCode != http.StatusForbidden {
+		return ""
+	}
+	server := strings.ToLower(resp.Header.Get("Server"))
+	xCache := strings.ToLower(resp.Header.Get("X-Cache"))
+	if server == "cloudfront" || strings.Contains(xCache, "error from cloudfront") {
+		return "CloudFront"
+	}
+	return ""
 }
 
 func tlsIgnoringTransport() *http.Transport {
