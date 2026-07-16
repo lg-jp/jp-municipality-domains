@@ -31,5 +31,34 @@ type Municipality = {
 
   // 都道府県名（漢字）
   prefecture_name_kanji: string;
+
+  // 庁舎（役所・役場）の情報
+  office: Office;
+};
+
+type Office = {
+  // 自治体名
+  name: string;
+
+  // 庁舎名
+  building: string;
+
+  // 郵便番号
+  zipcode: string;
+
+  // 庁舎の住所
+  address: string;
+
+  // 電話番号
+  tel: string;
+
+  // 緯度
+  lat: number;
+
+  // 経度
+  lon: number;
+
+  // JISコード
+  jiscode: string;
 };
 ```
